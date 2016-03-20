@@ -10,6 +10,7 @@ from setuptools import setup, find_packages
 # To use a consistent encoding
 from codecs import open
 from os import path
+from pip.req import parse_requirements
 
 here = path.abspath(path.dirname(__file__))
 
@@ -23,7 +24,7 @@ setup(
     # Versions should comply with PEP440.  For a discussion on single-sourcing
     # the version across setup.py and the project code, see
     # https://packaging.python.org/en/latest/single_source_version.html
-    version='0.0.1',
+    version='0.0.2',
 
     description='Run a linter on bitbucket diffs, and add comments.',
     long_description=long_description,
@@ -79,7 +80,9 @@ setup(
     # your project is installed. For an analysis of "install_requires" vs pip's
     # requirements files see:
     # https://packaging.python.org/en/latest/requirements.html
-    install_requires=[],
+    install_requires=[str(ir.req)
+                      for ir in parse_requirements("requirements.txt",
+                                                   session=False)],
 
     # List additional groups of dependencies here (e.g. development
     # dependencies). You can install these using the following syntax,
