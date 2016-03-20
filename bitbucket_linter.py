@@ -73,8 +73,8 @@ class BitbucketCommenter:
                 pull_requests))
         if len(branch_pull_requests) != 1:
             print ("Error: Found %s open pull requests for branch '%s'!" %
-                   (len(branch_pull_requests), branch_name))
-            sys.exit(1)
+                   (len(branch_pull_requests), self.branch_name))
+            sys.exit(0)
         self.pull_request = branch_pull_requests[0]
 
 
