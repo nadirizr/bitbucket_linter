@@ -154,12 +154,12 @@ def main():
         return 1
 
     # Gather all relevant command line arguments.
-    username = args[1] # "bamboo-ci_armis"
-    password = args[2] # "1fnQWXH1RqIZ3fwzAjKCHixc"
-    email = args[3] #"bamboo-ci@armis.com"
-    owner_username = args[4] #"armis-security"
-    repository_name = args[5] #"armis"
-    branch_name = args[6] #"nadir.test_pylint"
+    username = args[1]
+    password = args[2]
+    email = args[3]
+    owner_username = args[4]
+    repository_name = args[5]
+    branch_name = args[6]
 
     # Run the linter.
     commenter = BitbucketCommenter(username, password, email, owner_username,

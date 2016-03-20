@@ -1,7 +1,14 @@
 astroid==1.4.4
 colorama==0.3.7
-dazel==0.0.18
+future==0.15.2
 lazy-object-proxy==1.2.1
+oauthlib==1.0.3
+pybitbucket==0.11.0
 pylint==1.5.4
+requests==2.9.1
+requests-oauthlib==0.6.1
+simplejson==3.8.2
 six==1.10.0
+uritemplate==0.6
+wheel==0.26.0
 wrapt==1.10.6
