@@ -12,12 +12,17 @@ from pybitbucket.ref import Branch
 from pylint import epylint as lint
 
 
+### FIX for bug in pybitbucket
+PullRequestState.expect_state = PullRequestState.expect_valid_value
+### End of FIX
+
+
 POST_COMMENT_URL = ("https://api.bitbucket.org/1.0/repositories/"
                     "%(owner)s/%(repository)s/pullrequests/"
                     "%(pull_request_id)s/comments")
 DIFF_FILE_START_MAGIC = "+++ b/"
 
-PYLINT_MESSAGE_TEMPLATE = '{{"abspath":"{abspath}","line":{line},"column":{column},"msg":"{msg}","msg_id":"{msg_id}","category":"{category}"}}'
+PYLINT_MESSAGE_TEMPLATE = '{{"path":"{path}","line":{line},"column":{column},"msg":"{msg}","msg_id":"{msg_id}","category":"{category}","symbol":"{symbol}"}}'
 
 
 class BitbucketCommenter:
@@ -63,12 +68,20 @@ class BitbucketCommenter:
         }
         self.client.session.post(pr_post_comment_url, data=pr_post_comment_data)
 
+    def approve(self):
+        self.pull_request.approve()
+
+    def unapprove(self):
+        self.pull_request.unapprove()
+
     def _fetch_pull_request(self):
         # Fetch the correct pull request, and abort if none can be found.
         pull_requests = PullRequest.find_pullrequests_for_repository_by_state(
-                self.repository_name, owner=self.owner_username, client=self.client)
+                self.repository_name, owner=self.owner_username, state=PullRequestState.OPEN,
+                client=self.client)
         branch_pull_requests = list(filter(
-                lambda pr: (pr.source["branch"]["name"] == self.branch_name and
+                lambda pr: ("source" in pr.data and
+                            pr.source.get("branch", {}).get("name") == self.branch_name and
                             pr.state.upper() == PullRequestState.OPEN.upper()),
                 pull_requests))
         if len(branch_pull_requests) != 1:
@@ -98,37 +111,52 @@ class PyLinter:
             stderr=subprocess.STDOUT))
 
         # Read the output of the PyLint run.
-        pylint_output_lines = pylint_stdout[2:-1].split("\\n")
-        print ("\n".join(pylint_output_lines))
+        pylint_output_lines = pylint_stdout[2:-1].split("}\\n{")
+        print ("}\n{".join(pylint_output_lines))
 
         # Create the comment dictionary to make sure we don't repeat comments.
         comments_map = self._generate_comments_map()
 
         # Process the output of PyLint line by line.
+        had_comments = False
         for line in pylint_output_lines:
             # The format we use is a json format, so try to load it.
             try:
-                line = line.strip()
+                line = line.strip().replace("\n", "\\n")
+                line = "{" + line if not line.startswith("{") else line
+                line = line + "}" if not line.endswith("}") else line
                 data = json.loads(line)
             except:
                 continue
 
             # Generate the message content.
-            content = "%(category)s (%(msg_id)s): %(msg)s" % {
+            content = "%(category)s (%(msg_id)s %(symbol)s):\n\n```\n%(msg)s\n```\n" % {
                 "category": data["category"].upper(),
                 "msg_id": data["msg_id"],
-                "msg": data["msg"],
+                "symbol": data["symbol"],
+                "msg": data["msg"].replace("\\n", "\n"),
             }
+            had_comments = True
 
             # Check if the comment already exists.
             comment_key = (str(data["line"]).strip().lower(),
-                           str(data["abspath"]).strip().lower(),
+                           str(data["path"]).strip().lower(),
                            str(content).strip().lower())
             if comment_key in comments_map:
                 continue
 
             # Post the comment.
-            self.commenter.post_comment(content, data["abspath"], data["line"])
+            self.commenter.post_comment(content, data["path"], data["line"])
+
+            print ("Added comment on %s:%s: %s" % (
+                   data["path"], data["line"], content))
+
+        # If there were any comments, unapprove just for good measure.
+        # If there weren't any comments, approve it.
+        if had_comments:
+            self.commenter.unapprove()
+        else:
+            self.commenter.approve()
 
     def _get_py_diff_files(self):
         diff_files = self.commenter.get_diff_files()
@@ -154,12 +182,12 @@ def main():
         return 1
 
     # Gather all relevant command line arguments.
-    username = args[1]
-    password = args[2]
-    email = args[3]
-    owner_username = args[4]
-    repository_name = args[5]
-    branch_name = args[6]
+    username = args[1] if args[1] != "-" else os.environ["BITBUCKET_LINTER_USERNAME"]
+    password = args[2] if args[2] != "-" else os.environ["BITBUCKET_LINTER_PASSWORD"]
+    email = args[3] if args[3] != "-" else os.environ["BITBUCKET_LINTER_EMAIL"]
+    owner_username = args[4] if args[4] != "-" else os.environ["BITBUCKET_OWNER_USERNAME"]
+    repository_name = args[5] if args[5] != "-" else os.environ["BITBUCKET_REPOSITORY_NAME"]
+    branch_name = args[6] if args[6] != "-" else os.environ["BITBUCKET_BRANCH_NAME"]
 
     # Run the linter.
     commenter = BitbucketCommenter(username, password, email, owner_username,
