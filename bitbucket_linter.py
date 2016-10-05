@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import json
+import os
 import subprocess
 import sys
 
@@ -10,7 +11,7 @@ from pybitbucket.comment import Comment
 from pybitbucket.pullrequest import PullRequest, PullRequestState
 from pybitbucket.ref import Branch
 from pylint import epylint as lint
-
+import time
 
 ### FIX for bug in pybitbucket
 PullRequestState.expect_state = PullRequestState.expect_valid_value
@@ -24,18 +25,25 @@ DIFF_FILE_START_MAGIC = "+++ b/"
 
 PYLINT_MESSAGE_TEMPLATE = '{{"path":"{path}","line":{line},"column":{column},"msg":"{msg}","msg_id":"{msg_id}","category":"{category}","symbol":"{symbol}"}}'
 
+RETRY_SLEEP_TIME = 3
+
 
 class BitbucketCommenter:
-    """Posts comments to pull requests in BitBucket repositories."""
+    """Posts comments to pull requests in BitBucket repositories.
+    if retries_till_failure is n >= 0 then it will retry n times to get the pull requests and then will fail
+    other wise it will keep trying forever.
+    Will retry to
+    """
     
     def __init__(self, username, password, email, owner_username,
-                       repository_name, branch_name):
+                       repository_name, branch_name, retries_till_failure = 1):
         self.username = username
         self.password = password
         self.email = email
         self.owner_username = owner_username
         self.repository_name = repository_name
         self.branch_name = branch_name
+        self.retries_till_failure = retries_till_failure
 
         self.client = Client(BasicAuthenticator(username, password, email))
 
@@ -75,20 +83,32 @@ class BitbucketCommenter:
         self.pull_request.unapprove()
 
     def _fetch_pull_request(self):
-        # Fetch the correct pull request, and abort if none can be found.
-        pull_requests = PullRequest.find_pullrequests_for_repository_by_state(
-                self.repository_name, owner=self.owner_username, state=PullRequestState.OPEN,
-                client=self.client)
-        branch_pull_requests = list(filter(
-                lambda pr: ("source" in pr.data and
-                            pr.source.get("branch", {}).get("name") == self.branch_name and
-                            pr.state.upper() == PullRequestState.OPEN.upper()),
-                pull_requests))
-        if len(branch_pull_requests) != 1:
-            print ("Error: Found %s open pull requests for branch '%s'!" %
-                   (len(branch_pull_requests), self.branch_name))
-            sys.exit(0)
-        self.pull_request = branch_pull_requests[0]
+        attempts = 0
+        while self.retries_till_failure < 0 or attempts < self.retries_till_failure:
+            # Fetch the correct pull request, and abort if none can be found.
+            pull_requests = PullRequest.find_pullrequests_for_repository_by_state(
+                    self.repository_name, owner=self.owner_username, state=PullRequestState.OPEN,
+                    client=self.client)
+            branch_pull_requests = list(filter(
+                    lambda pr: ("source" in pr.data and
+                                pr.source.get("branch", {}).get("name") == self.branch_name and
+                                pr.state.upper() == PullRequestState.OPEN.upper()),
+                    pull_requests))
+            npull_requests = len(branch_pull_requests)
+
+            if npull_requests == 1:
+                self.pull_request = branch_pull_requests[0]
+                return
+            else:
+                if npull_requests == 0:
+                    print ("Error: Didn't find  open pull requests for branch '%s'!" % self.branch_name)
+                else:
+                    print ("Warning: Found %s open pull requests for branch '%s'!" %
+                           (npull_requests, self.branch_name))
+                time.sleep(RETRY_SLEEP_TIME)
+                attempts += 1
+
+        sys.exit(0)
 
 
 class PyLinter:
@@ -178,7 +198,8 @@ def main():
                                       " <bitbucket email>"
                                       " <bitbucket repository owner>"
                                       " <bitbucket repository>"
-                                      " <bitbucket branch name>")
+                                      " <bitbucket branch name>"
+                                      " [# retries to find pull request]")
         return 1
 
     # Gather all relevant command line arguments.
@@ -188,10 +209,13 @@ def main():
     owner_username = args[4] if args[4] != "-" else os.environ["BITBUCKET_OWNER_USERNAME"]
     repository_name = args[5] if args[5] != "-" else os.environ["BITBUCKET_REPOSITORY_NAME"]
     branch_name = args[6] if args[6] != "-" else os.environ["BITBUCKET_BRANCH_NAME"]
+    retries = -1
+    if (len(args)) > 7 and args[7] != "-" and args[7].isalnum():
+        retries = int(args[7])
 
     # Run the linter.
     commenter = BitbucketCommenter(username, password, email, owner_username,
-                                   repository_name, branch_name)
+                                   repository_name, branch_name, retries)
     linter = PyLinter(commenter)
     linter.run()
 
