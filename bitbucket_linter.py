@@ -8,13 +8,6 @@ from pybitbucket.auth import BasicAuthenticator
 from pybitbucket.bitbucket import Client
 from pybitbucket.comment import Comment
 from pybitbucket.pullrequest import PullRequest, PullRequestState
-from pybitbucket.ref import Branch
-from pylint import epylint as lint
-
-
-### FIX for bug in pybitbucket
-PullRequestState.expect_state = PullRequestState.expect_valid_value
-### End of FIX
 
 
 POST_COMMENT_URL = ("https://api.bitbucket.org/1.0/repositories/"
