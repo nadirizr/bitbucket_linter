@@ -1,196 +1,197 @@
-#!/usr/bin/env python
-
+import argparse
 import json
+import logging
+import os.path
+import re
 import subprocess
 import sys
 
-from pybitbucket.auth import BasicAuthenticator
-from pybitbucket.bitbucket import Client
-from pybitbucket.comment import Comment
-from pybitbucket.pullrequest import PullRequest, PullRequestState
+import pybitbucket.auth
+from pybitbucket import bitbucket
+# Those imports have side-effects, thus needed. pylint: disable=unused-import
+from pybitbucket import comment as _comment
+from pybitbucket import pullrequest as _pullrequest
+from pybitbucket import repository as _repository
+from pybitbucket import user as _user
+# pylint: enable=unused-import
+import uritemplate
 
 
-POST_COMMENT_URL = ("https://api.bitbucket.org/1.0/repositories/"
-                    "%(owner)s/%(repository)s/pullrequests/"
-                    "%(pull_request_id)s/comments")
-DIFF_FILE_START_MAGIC = "+++ b/"
+# The built-in methods of the bitbucket SDK do not support queries and sort on pullrequest.
+# Adding it here manually.
+PR_BY_QUERY_ENDPOINT = {
+    "_links": {
+        "repositoryPullRequestsByQuery": {
+            "href": ("https://api.bitbucket.org/2.0/repositories{/owner,repository_name}"
+                     "/pullrequests{?q,sort}"),
+        },
+    },
+}
+POST_COMMENT_TEMPLATE = ("{+bitbucket_url}/2.0/repositories{/owner,repository_name}"
+                         "/pullrequests{/pullrequest_id}/comments")
+DIFF_SCOPE_RE = re.compile(r"^@@ -\d+,\d+ \+(\d+),(\d+) @@")
 
-PYLINT_MESSAGE_TEMPLATE = '{{"path":"{path}","line":{line},"column":{column},"msg":"{msg}","msg_id":"{msg_id}","category":"{category}","symbol":"{symbol}"}}'
 
+class PullRequest:
+    def __init__(self, pr, user):
+        self.id = pr.id
+        self._pr = pr
+        self._user = user
 
-class BitbucketCommenter:
-    """Posts comments to pull requests in BitBucket repositories."""
-    
-    def __init__(self, username, password, email, owner_username,
-                       repository_name, branch_name):
-        self.username = username
-        self.password = password
-        self.email = email
-        self.owner_username = owner_username
-        self.repository_name = repository_name
-        self.branch_name = branch_name
+    def get_changed_lines(self, file_ext):
+        """Retruns a mapping between changed files and a set of changed line numbers."""
 
-        self.client = Client(BasicAuthenticator(username, password, email))
+        res = {}
+        # Filtering out deleted files, and files not ending with file_ext.
+        # TODO: Consider skipping files that are only moved (without changes).
+        for diffstat in self._pr.diffstat():
+            if diffstat["status"] != "removed" and diffstat["new"]["path"].endswith(file_ext):
+                res[diffstat["new"]["path"]] = set()
 
-        self._fetch_pull_request()
-
-    def get_diff_files(self):
-        diff = str(self.pull_request.diff())
-        diff_lines = diff.split("\\n")
-        file_lines = filter(lambda dl: dl.startswith(DIFF_FILE_START_MAGIC),
-                            diff_lines)
-        filenames = [dl[len(DIFF_FILE_START_MAGIC):] for dl in file_lines]
-        return filenames
+        fname = None
+        for line in self._pr.diff().decode().split("\n"):
+            if line.startswith("+++ b/"):
+                fname = line[6:]
+            if line.startswith("@@ -") and fname in res:
+                match = DIFF_SCOPE_RE.match(line)
+                start = int(match.group(1))
+                length = int(match.group(2))
+                res[fname].update(range(start, start+length))
+        return res
 
     def get_comments(self):
-        return self.pull_request.comments()
+        return set((c.inline["path"], c.inline["to"], c.content["raw"])
+                   for c in self._pr.comments() if not isinstance(c, dict) and
+                   not c.deleted and c.user["uuid"] == self._user.uuid and
+                   "inline" in c.attributes())
 
-    def post_comment(self, content, filename, line_number):
-        # Post the new comment.
-        pr_post_comment_url = POST_COMMENT_URL % {
-            "owner": self.owner_username,
-            "repository": self.repository_name,
-            "pull_request_id": self.pull_request.id,
+    def post_comment(self, path, line, content):
+        owner, repository_name = self._pr.source_repository.full_name.split("/")
+        api_uri = uritemplate.expand(POST_COMMENT_TEMPLATE, {
+            "bitbucket_url": self._pr.client.get_bitbucket_url(),
+            "owner": owner,
+            "repository_name": repository_name,
+            "pullrequest_id": self._pr.id,
+        })
+        data = {
+            "content": {
+                "raw": content,
+            },
+            "inline": {
+                "path": path,
+                "to": line,
+            },
         }
-        pr_post_comment_data = {
-            "content": content,
-            "anchor": self.pull_request.source_commit["hash"],
-            "dest_rev": self.pull_request.destination_commit["hash"],
-            "filename": filename,
-            "line_to": line_number,
-        }
-        self.client.session.post(pr_post_comment_url, data=pr_post_comment_data)
+        resp = self._pr.client.session.post(api_uri, json=data)
+        if not resp.ok:
+            logger.error("Failed posting comment on %s:%s: %s", path, line, resp.text)
 
     def approve(self):
-        self.pull_request.approve()
+        self._pr.approve()
 
     def unapprove(self):
-        self.pull_request.unapprove()
+        self._pr.unapprove()
 
-    def _fetch_pull_request(self):
-        # Fetch the correct pull request, and abort if none can be found.
-        pull_requests = PullRequest.find_pullrequests_for_repository_by_state(
-                self.repository_name, owner=self.owner_username, state=PullRequestState.OPEN,
-                client=self.client)
-        branch_pull_requests = list(filter(
-                lambda pr: ("source" in pr.data and
-                            pr.source.get("branch", {}).get("name") == self.branch_name and
-                            pr.state.upper() == PullRequestState.OPEN.upper()),
-                pull_requests))
-        if len(branch_pull_requests) != 1:
-            print ("Error: Found %s open pull requests for branch '%s'!" %
-                   (len(branch_pull_requests), self.branch_name))
-            sys.exit(0)
-        self.pull_request = branch_pull_requests[0]
+    @staticmethod
+    def get_pull_request(username, password, email, repository_name, owner, branch_name):
+        """Returns the latest updated OPEN pull request for a particular branch."""
+        client = bitbucket.Client(pybitbucket.auth.BasicAuthenticator(username, password, email))
+        bb = bitbucket.Bitbucket(client)
+        bb.add_remote_relationship_methods(PR_BY_QUERY_ENDPOINT)
+
+        res = bb.repositoryPullRequestsByQuery(
+            owner=owner,
+            repository_name=repository_name,
+            q='source.branch.name = "%s" AND state = "OPEN"' % branch_name, sort="-updated_on")
+
+        pr = next(res)
+        # This is weird, but if there's no data, we're getting a dict back.
+        if isinstance(pr, dict):
+            return None
+        user = next(bb.userForMyself())
+        return PullRequest(pr, user)
 
 
-class PyLinter:
-    """Runs PyLint on the diff files from commenter, and adds comments."""
+def run_pylint(linter, files_to_lint):
+    pylint_proc = subprocess.run(
+        [linter, "--output-format=json"] + list(files_to_lint),
+        stdout=subprocess.PIPE,
+        universal_newlines=True,
+    )
 
-    def __init__(self, commenter):
-        """Receives the commenter to use for adding comments."""
-        self.commenter = commenter
-        
-    def run(self):
-        """Runs the linter and adds the necessary comments."""
-        # Run PyLint on the .py diff files.
-        py_diff_files = self._get_py_diff_files()
-        if not py_diff_files:
-            return
-        pylint_stdout = str(subprocess.check_output(
-            "pylint --output-format=text --msg-template='%s' \"%s\"; exit 0" % (
-                PYLINT_MESSAGE_TEMPLATE, '" "'.join(py_diff_files)),
-            shell=True,
-            stderr=subprocess.STDOUT))
+    if pylint_proc.returncode >= 32:
+        pylint_proc.check_returncode()
 
-        # Read the output of the PyLint run.
-        pylint_output_lines = pylint_stdout[2:-1].split("}\\n{")
-        print ("}\n{".join(pylint_output_lines))
+    pylint_output = json.loads(pylint_proc.stdout)
+    # Sometimes we need to canonicalize path to match bitbucket's output.
+    for lint_entry in pylint_output:
+        if lint_entry["path"].startswith("/"):
+            lint_entry["path"] = os.path.relpath(lint_entry["path"])
 
-        # Create the comment dictionary to make sure we don't repeat comments.
-        comments_map = self._generate_comments_map()
+    return pylint_output
 
-        # Process the output of PyLint line by line.
-        had_comments = False
-        for line in pylint_output_lines:
-            # The format we use is a json format, so try to load it.
-            try:
-                line = line.strip().replace("\n", "\\n")
-                line = "{" + line if not line.startswith("{") else line
-                line = line + "}" if not line.endswith("}") else line
-                data = json.loads(line)
-            except:
-                continue
 
-            # Generate the message content.
-            content = "%(category)s (%(msg_id)s %(symbol)s):\n\n```\n%(msg)s\n```\n" % {
-                "category": data["category"].upper(),
-                "msg_id": data["msg_id"],
-                "symbol": data["symbol"],
-                "msg": data["msg"].replace("\\n", "\n"),
-            }
-            had_comments = True
+def lint_pr(pr, linter, approve):
+    logging.info("Running pylint for PR %s.", pr.id)
+    changed_lines = pr.get_changed_lines(".py")
+    pylint_output = run_pylint(linter, changed_lines.keys())
+    comments = pr.get_comments()
 
-            # Check if the comment already exists.
-            comment_key = (str(data["line"]).strip().lower(),
-                           str(data["path"]).strip().lower(),
-                           str(content).strip().lower())
-            if comment_key in comments_map:
-                continue
+    approved = True
+    for lint_entry in pylint_output:
+        if lint_entry["line"] not in changed_lines[lint_entry["path"]]:
+            logging.info("Skipping comment on %s:%d, not in the PR scope.",
+                         lint_entry["path"], lint_entry["line"])
+            continue
 
-            # Post the comment.
-            self.commenter.post_comment(content, data["path"], data["line"])
+        approved = False
+        content = "%(type)s (%(message-id)s %(symbol)s):\n\n> %(message)s" % lint_entry
 
-            print ("Added comment on %s:%s: %s" % (
-                   data["path"], data["line"], content))
+        comment_key = (lint_entry["path"], lint_entry["line"], content)
+        if comment_key in comments:
+            logging.info("Skipping comment on %s:%d, already in the PR.",
+                         lint_entry["path"], lint_entry["line"])
+            continue
 
-        # If there were any comments, unapprove just for good measure.
-        # If there weren't any comments, approve it.
-        if had_comments:
-            self.commenter.unapprove()
-        else:
-            self.commenter.approve()
+        logging.info("Posting comment on %s:%d.", lint_entry["path"], lint_entry["line"])
+        pr.post_comment(*comment_key)
 
-    def _get_py_diff_files(self):
-        diff_files = self.commenter.get_diff_files()
-        return filter(lambda df: df.strip().endswith(".py"), diff_files)
+    if not approve:
+        logging.info("Not %s PR, --approve=false.", "approving" if approved else "unapproving")
+        return
 
-    def _generate_comments_map(self):
-        return set((str(c.inline["to"]).strip().lower(),
-                    str(c.inline["path"]).strip().lower(),
-                    str(c.content["raw"]).strip().lower())
-                   for c in self.commenter.get_comments()
-                   if type(c) == Comment and "inline" in c.data)
-        
+    if approved:
+        logging.info("Approving PR.")
+        pr.approve()
+        return
+
+    logging.info("Unapproving PR.")
+    pr.unapprove()
+
 
 def main():
-    args = sys.argv
-    if len(args) < 7:
-        print ("Usage: bamboo_linter.py <bitbucket username>"
-                                      " <bitbucket password>"
-                                      " <bitbucket email>"
-                                      " <bitbucket repository owner>"
-                                      " <bitbucket repository>"
-                                      " <bitbucket branch name>")
+    parser = argparse.ArgumentParser(
+        description="Runs pylint on changed py files of a Bitbucket PR, and leaves comments.")
+    parser.add_argument("username")
+    parser.add_argument("password")
+    parser.add_argument("email")
+    parser.add_argument("owner")
+    parser.add_argument("repository")
+    parser.add_argument("branch")
+    parser.add_argument("--linter", default="pylint")
+    parser.add_argument("--approve", type=bool, default=False)
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO)
+
+    pr = PullRequest.get_pull_request(
+        args.username, args.password, args.email, args.owner, args.repository, args.branch)
+    if pr is None:
+        logging.warning("No PR found for branch '%s'. Exiting", args.branch)
         return 1
-
-    # Gather all relevant command line arguments.
-    username = args[1] if args[1] != "-" else os.environ["BITBUCKET_LINTER_USERNAME"]
-    password = args[2] if args[2] != "-" else os.environ["BITBUCKET_LINTER_PASSWORD"]
-    email = args[3] if args[3] != "-" else os.environ["BITBUCKET_LINTER_EMAIL"]
-    owner_username = args[4] if args[4] != "-" else os.environ["BITBUCKET_OWNER_USERNAME"]
-    repository_name = args[5] if args[5] != "-" else os.environ["BITBUCKET_REPOSITORY_NAME"]
-    branch_name = args[6] if args[6] != "-" else os.environ["BITBUCKET_BRANCH_NAME"]
-
-    # Run the linter.
-    commenter = BitbucketCommenter(username, password, email, owner_username,
-                                   repository_name, branch_name)
-    linter = PyLinter(commenter)
-    linter.run()
-
+    lint_pr(pr, args.linter, args.approve)
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
