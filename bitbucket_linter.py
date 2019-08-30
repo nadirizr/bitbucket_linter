@@ -185,7 +185,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
 
     pr = PullRequest.get_pull_request(
-        args.username, args.password, args.email, args.owner, args.repository, args.branch)
+        args.username, args.password, args.email, args.repository, args.owner, args.branch)
     if pr is None:
         logging.warning("No PR found for branch '%s'. Exiting", args.branch)
         return 1
