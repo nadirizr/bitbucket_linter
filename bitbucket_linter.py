@@ -122,7 +122,10 @@ def run_pylint(linter, files_to_lint):
     if pylint_proc.returncode >= 32:
         pylint_proc.check_returncode()
 
-    pylint_output = json.loads(pylint_proc.stdout)
+    pylint_output = []
+    if pylint_proc.stdout:
+        pylint_output = json.loads(pylint_proc.stdout)
+
     # Sometimes we need to canonicalize path to match bitbucket's output.
     for lint_entry in pylint_output:
         if lint_entry["path"].startswith("/"):
