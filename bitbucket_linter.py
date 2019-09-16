@@ -112,9 +112,10 @@ class PullRequest:
         return PullRequest(pr, user)
 
 
-def run_pylint(linter, files_to_lint):
+def run_pylint(linter, linter_flags, files_to_lint):
+    print([linter, "--output-format=json"] + linter_flags + list(files_to_lint))
     pylint_proc = subprocess.run(
-        [linter, "--output-format=json"] + list(files_to_lint),
+        [linter, "--output-format=json"] + linter_flags + list(files_to_lint),
         stdout=subprocess.PIPE,
         universal_newlines=True,
     )
@@ -134,10 +135,10 @@ def run_pylint(linter, files_to_lint):
     return pylint_output
 
 
-def lint_pr(pr, linter, approve):
+def lint_pr(pr, linter, linter_flags, approve):
     logging.info("Running pylint for PR %s.", pr.id)
     changed_lines = pr.get_changed_lines(".py")
-    pylint_output = run_pylint(linter, changed_lines.keys())
+    pylint_output = run_pylint(linter, linter_flags, changed_lines.keys())
     comments = pr.get_comments()
 
     approved = True
@@ -181,6 +182,7 @@ def main():
     parser.add_argument("owner")
     parser.add_argument("repository")
     parser.add_argument("branch")
+    parser.add_argument("linter_flags", nargs="*")
     parser.add_argument("--linter", default="pylint")
     parser.add_argument("--approve", type=bool, default=False)
     args = parser.parse_args()
@@ -192,7 +194,7 @@ def main():
     if pr is None:
         logging.warning("No PR found for branch '%s'. Exiting", args.branch)
         return 1
-    lint_pr(pr, args.linter, args.approve)
+    lint_pr(pr, args.linter, args.linter_flags, args.approve)
     return 0
 
 
