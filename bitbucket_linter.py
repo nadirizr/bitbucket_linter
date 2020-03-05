@@ -71,7 +71,7 @@ class PullRequest:
             "bitbucket_url": self._pr.client.get_bitbucket_url(),
             "owner": owner,
             "repository_name": repository_name,
-            "pullrequest_id": self._pr.id,
+            "pullrequest_id": str(self._pr.id),
         })
         data = {
             "content": {
@@ -84,7 +84,7 @@ class PullRequest:
         }
         resp = self._pr.client.session.post(api_uri, json=data)
         if not resp.ok:
-            logger.error("Failed posting comment on %s:%s: %s", path, line, resp.text)
+            logging.error("Failed posting comment on %s:%s: %s", path, line, resp.text)
 
     def approve(self):
         self._pr.approve()
