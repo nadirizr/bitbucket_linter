@@ -38,14 +38,16 @@ class PullRequest:
         self._pr = pr
         self._user = user
 
-    def get_changed_lines(self, file_ext):
+    def get_changed_lines(self, file_ext, exclude_paths):
         """Retruns a mapping between changed files and a set of changed line numbers."""
 
         res = {}
         # Filtering out deleted files, and files not ending with file_ext.
         # TODO: Consider skipping files that are only moved (without changes).
         for diffstat in self._pr.diffstat():
-            if diffstat["status"] != "removed" and diffstat["new"]["path"].endswith(file_ext):
+            if (diffstat["status"] != "removed" and
+                diffstat["new"]["path"].endswith(file_ext) and
+                (not exclude_paths or not diffstat["new"]["path"].startswith(tuple(exclude_paths)))):
                 res[diffstat["new"]["path"]] = set()
 
         fname = None
@@ -135,9 +137,9 @@ def run_pylint(linter, linter_flags, files_to_lint):
     return pylint_output
 
 
-def lint_pr(pr, linter, linter_flags, approve):
+def lint_pr(pr, linter, linter_flags, approve, exclude_paths):
     logging.info("Running pylint for PR %s.", pr.id)
-    changed_lines = pr.get_changed_lines(".py")
+    changed_lines = pr.get_changed_lines(".py", exclude_paths)
     pylint_output = run_pylint(linter, linter_flags, changed_lines.keys())
     comments = pr.get_comments()
 
@@ -185,6 +187,7 @@ def main():
     parser.add_argument("linter_flags", nargs="*")
     parser.add_argument("--linter", default="pylint")
     parser.add_argument("--approve", type=bool, default=False)
+    parser.add_argument("--exclude-path", type=str, action="append")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -194,7 +197,7 @@ def main():
     if pr is None:
         logging.warning("No PR found for branch '%s'. Exiting", args.branch)
         return 1
-    lint_pr(pr, args.linter, args.linter_flags, args.approve)
+    lint_pr(pr, args.linter, args.linter_flags, args.approve, args.exclude_path)
     return 0
 
 
